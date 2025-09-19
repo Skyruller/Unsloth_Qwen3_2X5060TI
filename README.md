@@ -109,3 +109,4 @@ unsloth @ git+https://github.com/unslothai/unsloth.git@7c59a9b63fab13cdfe3fe0f2d
 unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo.git@8b312c089a92b5bcde02beb6d68f92e9d81c95fd
 uri-template==1.3.0
 ```
+## ⚡  Thanks "unsloth-5090-multiple"
