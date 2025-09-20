@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-import os
-import sys  # For flushing output
-import gc
+import os, sys, gc
+import subprocess, shutil
 
-# --- Critical Environment Variables (set BEFORE torch import) ---
+
+# --- Настройка окружения (до импорта torch) ---
 os.environ["TORCH_DISTRIBUTED_USE_DTENSOR"] = "0"
 os.environ["TORCH_DIST_DDP_SHARDING"] = "0"
 os.environ["ACCELERATE_USE_TP"] = "false"
@@ -14,342 +14,216 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
 os.environ["TORCHINDUCTOR_DISABLE"] = "1"
 
-# --- Early debug prints ---
 print(f"[PID {os.getpid()}] Script start. Python version: {sys.version}", flush=True)
 print(f"[PID {os.getpid()}] Current PWD: {os.getcwd()}", flush=True)
-print(f"[PID {os.getpid()}] TORCH_DISTRIBUTED_USE_DTENSOR: {os.environ.get('TORCH_DISTRIBUTED_USE_DTENSOR')}", flush=True)
-print(f"[PID {os.getpid()}] CUDA_VISIBLE_DEVICES (from env): {os.environ.get('CUDA_VISIBLE_DEVICES')}", flush=True)
-print(f"[PID {os.getpid()}] ACCELERATE_USE_TP: {os.environ.get('ACCELERATE_USE_TP')}", flush=True)
 
-LAUNCHER_RANK = os.environ.get('RANK', 'N/A_LAUNCHER_RANK')
-LAUNCHER_LOCAL_RANK = os.environ.get('LOCAL_RANK', 'N/A_LOCAL_RANK')
-LAUNCHER_WORLD_SIZE = os.environ.get('WORLD_SIZE', 'N/A_WORLD_SIZE')
-print(f"[PID {os.getpid()}] Launcher Env: RANK={LAUNCHER_RANK}, LOCAL_RANK={LAUNCHER_LOCAL_RANK}, WORLD_SIZE={LAUNCHER_WORLD_SIZE}", flush=True)
+LAUNCHER_RANK = os.environ.get('RANK', 'N/A')
+LAUNCHER_LOCAL_RANK = os.environ.get('LOCAL_RANK', 'N/A')
+LAUNCHER_WORLD_SIZE = os.environ.get('WORLD_SIZE', 'N/A')
+print(f"Launcher Env: RANK={LAUNCHER_RANK}, LOCAL_RANK={LAUNCHER_LOCAL_RANK}, WORLD_SIZE={LAUNCHER_WORLD_SIZE}", flush=True)
 
-# --- Import torch and apply aggressive DTensor patch ---
 import torch
-print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] Imported torch. Version: {torch.__version__}. CUDA available: {torch.cuda.is_available()}", flush=True)
-
+print(f"Torch {torch.__version__}, CUDA available: {torch.cuda.is_available()}", flush=True)
 if torch.cuda.is_available():
-    print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] CUDA device count: {torch.cuda.device_count()}", flush=True)
-    try:
-        if LAUNCHER_LOCAL_RANK != 'N/A_LOCAL_RANK':
-            local_rank = int(LAUNCHER_LOCAL_RANK)
-            # Убедимся, что мы используем правильное устройство
-            torch.cuda.set_device(local_rank)
-            print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] Set CUDA device to: cuda:{local_rank}", flush=True)
-            print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] Name of current CUDA device: {torch.cuda.get_device_name(local_rank)}", flush=True)
-        else:
-            print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] LOCAL_RANK not set.", flush=True)
-    except Exception as e_cuda_print:
-        print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] Error setting CUDA device: {e_cuda_print}", flush=True)
+    print(f"CUDA devices: {torch.cuda.device_count()}", flush=True)
+    if LAUNCHER_LOCAL_RANK != 'N/A':
+        local_rank = int(LAUNCHER_LOCAL_RANK)
+        torch.cuda.set_device(local_rank)
+        print(f"Set CUDA device to cuda:{local_rank} - {torch.cuda.get_device_name(local_rank)}", flush=True)
 
-# AGGRESSIVE DTENSOR PATCH
+# Патч DTensor
 try:
     from torch.distributed.tensor import DTensor
-    if hasattr(DTensor, "_op_dispatcher") and \
-       hasattr(DTensor._op_dispatcher, "sharding_propagator") and \
-       hasattr(DTensor._op_dispatcher.sharding_propagator, "propagate"):
+    if hasattr(DTensor, "_op_dispatcher"):
         original_propagate = DTensor._op_dispatcher.sharding_propagator.propagate
         def _no_op_propagate(self_sharding_prop, op_info, *args, **kwargs):
             return op_info.output_sharding
         DTensor._op_dispatcher.sharding_propagator.propagate = _no_op_propagate
-        print(f"✅ [PID {os.getpid()}, Rank {LAUNCHER_RANK}] Successfully patched DTensor._op_dispatcher.sharding_propagator.propagate.", flush=True)
-except ImportError:
-    print(f"⚠️ [PID {os.getpid()}, Rank {LAUNCHER_RANK}] torch.distributed.tensor.DTensor not found. Patch skipped.", flush=True)
+        print("✅ Patched DTensor propagate", flush=True)
 except Exception as e:
-    print(f"⚠️ [PID {os.getpid()}, Rank {LAUNCHER_RANK}] Error during DTensor patching: {e}", flush=True)
+    print(f"⚠️ DTensor patch skipped: {e}", flush=True)
 
-print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] Importing accelerate...", flush=True)
 from accelerate import Accelerator
-print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] Imported accelerate.", flush=True)
-
-print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] Importing Unsloth...", flush=True)
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import get_chat_template, standardize_sharegpt
-print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] Imported Unsloth.", flush=True)
-
-print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] Importing Transformers & Datasets...", flush=True)
 from transformers import TrainingArguments
 from datasets import load_dataset
 from trl import SFTTrainer
-print(f"[PID {os.getpid()}, Rank {LAUNCHER_RANK}] Imported Transformers & Datasets.", flush=True)
 
-# --- Configuration ---
-MODEL_PATH = "/media/skyruller/Новый том/models/Qwen3-14B"
-MAX_SEQ_LENGTH = int(os.getenv("UNSLOTH_MAX_SEQ", 1024))  # Use 2048 for stability
-LORA_R = 8
-LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-LORA_ALPHA = 8
+# --- Конфигурация ---
+MODEL_PATH = "/home/skyruller/webui/user_data/models/Qwen3-4B-Instruct-2507"
+MAX_SEQ_LENGTH = int(os.getenv("UNSLOTH_MAX_SEQ", 1024))
+LORA_R = 256
+LORA_TARGET_MODULES = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]
+LORA_ALPHA = 512
 LORA_DROPOUT = 0.0
-LOCAL_JSONL = "/media/skyruller/Новый том/dataset/dataset_clean.jsonl"
+LOCAL_JSONL = "/media/skyruller/Новый том/dataset/dataset_unescaped.jsonl"
 TEST_SPLIT_RATIO = 0.1238
 BATCH_SIZE = 1
-GRADIENT_ACCUMULATION_STEPS = 1
-MAX_STEPS = 300
+GRADIENT_ACCUMULATION_STEPS = 2
+MAX_STEPS = 30
 LEARNING_RATE = 2e-4
 
-
-# --- Model Loading ---
-def load_model(current_accelerator):
-    rank_idx = current_accelerator.process_index
-    local_rank = current_accelerator.local_process_index
-    pid = os.getpid()
-    print(f"[PID {pid}, Rank {rank_idx}] In load_model()...", flush=True)
-
-    # 🔥 ВАЖНО: УКАЗЫВАЕМ device_map ЯВНО!
-    device_map = {"": f"cuda:{local_rank}"}
-
+def load_model(accel):
+    device_map = {"": f"cuda:{accel.local_process_index}"}
     model_kwargs = {
         "model_name": MODEL_PATH,
         "max_seq_length": MAX_SEQ_LENGTH,
         "load_in_4bit": True,
         "attn_implementation": "sdpa",
         "dtype": torch.bfloat16,
-        "device_map": device_map,  # <-- КЛЮЧЕВОЙ ФИКС!
+        "device_map": device_map,
     }
-
-    print(f"[PID {pid}, Rank {rank_idx}] model_kwargs: {model_kwargs}", flush=True)
-    print(f"[PID {pid}, Rank {rank_idx}] Calling FastLanguageModel.from_pretrained...", flush=True)
-
-    try:
-        model, tokenizer = FastLanguageModel.from_pretrained(**model_kwargs)
-        print(f"[PID {pid}, Rank {rank_idx}] FastLanguageModel.from_pretrained successful.")
-        print(f"[PID {pid}, Rank {rank_idx}] Model device after load: {model.device}")
-    except Exception as e_load:
-        print(f"🔥🔥🔥 [PID {pid}, Rank {rank_idx}] ERROR during FastLanguageModel.from_pretrained: {e_load}", flush=True)
-        import traceback
-        traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
-        raise
-
+    model, tokenizer = FastLanguageModel.from_pretrained(**model_kwargs)
     return model, tokenizer
 
+def apply_lora(model):
+    return FastLanguageModel.get_peft_model(
+        model,
+        r=LORA_R,
+        target_modules=LORA_TARGET_MODULES,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=3407,
+        use_rslora=False,
+        loftq_config=None,
+    )
 
-# --- LoRA Application ---
-def apply_lora(base_model, current_accelerator):
-    rank_idx = current_accelerator.process_index
-    pid = os.getpid()
-    print(f"[PID {pid}, Rank {rank_idx}] In apply_lora()...", flush=True)
-    try:
-        lora_model = FastLanguageModel.get_peft_model(
-            base_model,
-            r=LORA_R,
-            target_modules=LORA_TARGET_MODULES,
-            lora_alpha=LORA_ALPHA,
-            lora_dropout=LORA_DROPOUT,
-            bias="none",
-            use_gradient_checkpointing="unsloth",
-            random_state=3407,
-            use_rslora=False,
-            loftq_config=None,
+def load_split_dataset():
+    ds = load_dataset("json", data_files={"train": LOCAL_JSONL}, trust_remote_code=True)["train"]
+    splits = ds.train_test_split(test_size=TEST_SPLIT_RATIO, seed=42)
+    return splits["train"], splits["test"]
+def post_training_menu(accelerator, trainer, tokenizer):
+    if not accelerator.is_main_process:
+        return
+
+    # Пути по умолчанию
+    LORA_DIR = "lora_adapters_final"
+    MERGED_DIR = "merged_qwen3_4b_instruct_fp16"
+    GGUF_F16 = "qwen3-4b-finetuned-f16.gguf"
+    GGUF_Q4KM = "qwen3-4b-finetuned.q4_k_m.gguf"
+
+    # Путь к llama.cpp (ожидаем папку рядом с этим скриптом)
+    llama_cpp_dir = os.path.join(os.getcwd(), "llama.cpp")
+    convert_script = os.path.join(llama_cpp_dir, "convert-hf-to-gguf.py")
+    quant_bin = os.path.join(llama_cpp_dir, "quantize")
+
+    def _save_adapters():
+        print("→ Сохраняю LoRA-адаптеры…")
+        trainer.model.save_pretrained(LORA_DIR)
+        tokenizer.save_pretrained(LORA_DIR)
+        print(f"✓ Адаптеры сохранены в: {LORA_DIR}")
+
+    def _merge_fp16():
+        print("→ Делаю корректный merge в FP16 (Unsloth)…")
+        peft_model = accelerator.unwrap_model(trainer.model)
+        peft_model.save_pretrained_merged(
+            MERGED_DIR,
+            tokenizer,
+            save_method="merged_16bit",
+            safe_serialization=True,
         )
-        print(f"[PID {pid}, Rank {rank_idx}] apply_lora successful.", flush=True)
-        return lora_model
-    except Exception as e_lora:
-        print(f"🔥🔥🔥 [PID {pid}, Rank {rank_idx}] ERROR during apply_lora: {e_lora}", flush=True)
-        import traceback
-        traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
-        raise
+        print(f"✓ Слитая FP16-модель сохранена в: {MERGED_DIR}")
+
+    def _make_gguf():
+        if not os.path.isdir(MERGED_DIR):
+            print(f"✗ Папка {MERGED_DIR} не найдена. Сначала сделай merge (п.2).")
+            return
+        if not os.path.isfile(convert_script):
+            print(f"✗ convert-hf-to-gguf.py не найден: {convert_script}")
+            return
+
+        print(f"→ HF→GGUF f16: {MERGED_DIR} → {GGUF_F16}")
+        cmd = [sys.executable, convert_script, MERGED_DIR, "--outfile", GGUF_F16]
+        subprocess.run(cmd, check=True)
+        print(f"✓ GGUF f16 готов: {GGUF_F16}")
+
+        # спросим про квант
+        ans = input("Квантануть в q4_k_m? [y/N]: ").strip().lower()
+        if ans == "y":
+            if not os.path.isfile(quant_bin):
+                print(f"✗ quantize не найден: {quant_bin}")
+                return
+            print(f"→ Квантование: {GGUF_F16} → {GGUF_Q4KM}")
+            subprocess.run([quant_bin, GGUF_F16, GGUF_Q4KM, "q4_k_m"], check=True)
+            print(f"✓ GGUF q4_k_m готов: {GGUF_Q4KM}")
+
+    while True:
+        print("\n=== Post-training menu ===")
+        print("1) Сохранить адаптеры LoRA")
+        print("2) Слить LoRA→FP16 (merged)")
+        print("3) Сделать GGUF f16 (и опционально q4_k_m)")
+        print("4) Сохранить и выйти (ничего больше не делать)")
+        choice = input("Выбор [1/2/3/4]: ").strip()
+
+        if choice == "1":
+            _save_adapters()
+        elif choice == "2":
+            _save_adapters()  # полезно иметь адаптеры отдельно
+            _merge_fp16()
+        elif choice == "3":
+            _make_gguf()
+        elif choice == "4":
+            # На всякий случай сохраним адаптеры, если ещё не сохраняли
+            if not os.path.isdir(LORA_DIR):
+                _save_adapters()
+            print("Выход.")
+            break
+        else:
+            print("Не понял выбор. Повтори.")
 
 
-# --- Dataset Handling ---
-def load_and_split_dataset(current_accelerator):
-    rank_idx = current_accelerator.process_index
-    pid = os.getpid()
-    print(f"[PID {pid}, Rank {rank_idx}] In load_and_split_dataset()...", flush=True)
-    try:
-        ds = load_dataset("json", data_files={"train": LOCAL_JSONL}, trust_remote_code=True)["train"]
-        splits = ds.train_test_split(test_size=TEST_SPLIT_RATIO, seed=42)
-        print(f"[PID {pid}, Rank {rank_idx}] load_and_split_dataset successful.", flush=True)
-        return splits["train"], splits["test"]
-    except Exception as e_dsload:
-        print(f"🔥🔥🔥 [PID {pid}, Rank {rank_idx}] ERROR during load_and_split_dataset: {e_dsload}", flush=True)
-        import traceback
-        traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
-        raise
-
-
-# --- Main Function ---
 def main():
-    pid = os.getpid()
-    print(f"[PID {pid}, Pre-Accelerator-Rank] In main(). Initializing Accelerator...", flush=True)
     accelerator = Accelerator()
-    rank_idx = accelerator.process_index
-    print(f"[PID {pid}, Rank {rank_idx}] Accelerator initialized. Distributed: {accelerator.distributed_type}, Device: {accelerator.device}, Num_processes: {accelerator.num_processes}", flush=True)
-
-    print(f"[PID {pid}, Rank {rank_idx}] Loading model and tokenizer...", flush=True)
     model, tokenizer = load_model(accelerator)
-    print(f"[PID {pid}, Rank {rank_idx}] Model and tokenizer loaded.", flush=True)
-
-    print(f"[PID {pid}, Rank {rank_idx}] Applying LoRA...", flush=True)
-    model = apply_lora(model, accelerator)
-    print(f"[PID {pid}, Rank {rank_idx}] LoRA applied.", flush=True)
-
-    print(f"[PID {pid}, Rank {rank_idx}] Loading and splitting dataset...", flush=True)
-    train_ds_raw, val_ds_raw = load_and_split_dataset(accelerator)
-    print(f"[PID {pid}, Rank {rank_idx}] Dataset loaded and split.", flush=True)
+    model = apply_lora(model)
+    train_ds, val_ds = load_split_dataset()
 
     if tokenizer.pad_token is None:
-        print(f"[PID {pid}, Rank {rank_idx}] Setting pad_token to eos_token.", flush=True)
         tokenizer.pad_token = tokenizer.eos_token
 
-    train_ds = train_ds_raw
-    val_ds = val_ds_raw
-
-    print(f"[PID {pid}, Rank {rank_idx}] Getting chat template...", flush=True)
-    if tokenizer.pad_token is None:
-        print(f"[PID {pid}, Rank {rank_idx}] Re-setting pad_token to eos_token post chat_template.", flush=True)
-        tokenizer.pad_token = tokenizer.eos_token
-    print(f"[PID {pid}, Rank {rank_idx}] Chat template applied.", flush=True)
-
-    DATASET_MAP_NUM_PROC = 1
-    print(f"[PID {pid}, Rank {rank_idx}] Passing through train_ds text as-is (num_proc={DATASET_MAP_NUM_PROC})...", flush=True)
-    train_ds = train_ds.map(lambda ex: {"text": ex["text"]}, num_proc=DATASET_MAP_NUM_PROC, remove_columns=[col for col in train_ds.features if col != 'text'])
-
-    print(f"[PID {pid}, Rank {rank_idx}] Passing through val_ds text as-is (batched=True)...", flush=True)
-    val_ds = val_ds.map(lambda batch: {"text": batch["text"]}, batched=True, num_proc=DATASET_MAP_NUM_PROC, remove_columns=[col for col in val_ds.features if col != 'text'])
-
-    print(f"[PID {pid}, Rank {rank_idx}] Datasets processed.", flush=True)
+    train_ds = train_ds.map(lambda ex: {"text": ex["text"]}, remove_columns=[c for c in train_ds.features if c != 'text'])
+    val_ds = val_ds.map(lambda ex: {"text": ex["text"]}, remove_columns=[c for c in val_ds.features if c != 'text'])
 
     training_args = TrainingArguments(
-    per_device_train_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-    num_train_epochs=15,              # <-- Количество эпох
-    learning_rate=LEARNING_RATE,
-    logging_steps=30,
-    optim="adamw_8bit",
-    weight_decay=0.01,
-    lr_scheduler_type="linear",
-    seed=3407,
-    output_dir="outputs",
-    report_to="none",
-    gradient_checkpointing=True,
-    ddp_find_unused_parameters=False,
-    bf16=True,
-    fp16=False,
-)
-    print(f"[PID {pid}, Rank {rank_idx}] TrainingArguments initialized.", flush=True)
+        per_device_train_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        num_train_epochs=1,
+        learning_rate=LEARNING_RATE,
+        logging_steps=30,
+        optim="adamw_8bit",
+        weight_decay=0.01,
+        lr_scheduler_type="linear",
+        seed=3407,
+        output_dir="outputs",
+        report_to="none",
+        gradient_checkpointing=True,
+        ddp_find_unused_parameters=False,
+        bf16=True,
+        fp16=False,
+    )
 
-    print(f"[PID {pid}, Rank {rank_idx}] Initializing SFTTrainer...", flush=True)
-    SFT_DATASET_NUM_PROC = 1
     trainer = SFTTrainer(
-    model=model,
-    tokenizer=tokenizer,
-    train_dataset=train_ds,
-    eval_dataset=val_ds,
-    dataset_text_field="text",
-    max_seq_length=MAX_SEQ_LENGTH,
-    dataset_num_proc=SFT_DATASET_NUM_PROC,
-    packing=False,
-    args=training_args,
-    use_fused_cross_entropy=False,  # <-- Ключевая строка!
-)
-    print(f"[PID {pid}, Rank {rank_idx}] SFTTrainer initialized. Model is on: {trainer.model.device}", flush=True)
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
+        dataset_text_field="text",
+        max_seq_length=MAX_SEQ_LENGTH,
+        dataset_num_proc=1,
+        packing=False,
+        args=training_args,
+        use_fused_cross_entropy=False,
+    )
 
-    if accelerator.is_main_process:
-        print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: Pre-train check for model.config.use_cache.", flush=True)
-        unwrapped_model_for_config = accelerator.unwrap_model(trainer.model)
-        if hasattr(unwrapped_model_for_config, "config") and getattr(unwrapped_model_for_config.config, "use_cache", False):
-            print(f"✅ [PID {pid}, Rank {rank_idx}] MAIN PROCESS: Forcing model.config.use_cache = False on unwrapped model.", flush=True)
-            unwrapped_model_for_config.config.use_cache = False
+       # --- Обучение ---
+    trainer.train()
+    print("[main] Обучение завершено.")
 
-    accelerator.wait_for_everyone()
-    print(f"[PID {pid}, Rank {rank_idx}] All processes ready. Calling trainer.train()...", flush=True)
-
-    try:
-        metrics = trainer.train()
-        print(f"[PID {pid}, Rank {rank_idx}] trainer.train() completed.", flush=True)
-    except Exception as e_train:
-        print(f"🔥🔥🔥 [PID {pid}, Rank {rank_idx}] ERROR during trainer.train(): {e_train}", flush=True)
-        import traceback
-        traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
-        sys.exit(1)
-
-    accelerator.wait_for_everyone()
-    print(f"[PID {pid}, Rank {rank_idx}] All processes finished training and synchronized.", flush=True)
-
-    if accelerator.is_main_process:
-        print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: Training finished. Saving artifacts...", flush=True)
-        lora_adapter_path = "lora_adapters_final"
-        merged_model_16bit_path = "merged_model_16bit"
-        full_merged_model_path = "full_merged_model"
-
-        print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: Saving LoRA adapters to {lora_adapter_path}...", flush=True)
-        try:
-            trainer.model.save_pretrained(lora_adapter_path)
-            tokenizer.save_pretrained(lora_adapter_path)
-            print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: LoRA adapters saved.", flush=True)
-        except Exception as e_lora_save:
-            print(f"⚠️ [PID {pid}, Rank {rank_idx}] MAIN PROCESS: Error saving LoRA adapters: {e_lora_save}", flush=True)
-            import traceback
-            traceback.print_exc(file=sys.stdout)
-            sys.stdout.flush()
-
-        print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: Unwrapping model for save...", flush=True)
-        unwrapped_model_for_save = accelerator.unwrap_model(trainer.model)
-
-        print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: Merging LoRA into base model...", flush=True)
-        try:
-            unwrapped_model_for_save.merge_and_unload()
-            print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: Merge successful.", flush=True)
-        except Exception as e_merge:
-            print(f"🔥🔥🔥 [PID {pid}, Rank {rank_idx}] MAIN PROCESS: ERROR during merge_and_unload: {e_merge}", flush=True)
-            import traceback
-            traceback.print_exc(file=sys.stdout)
-            sys.stdout.flush()
-            raise
-
-        print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: Saving merged model to {merged_model_16bit_path}...", flush=True)
-        try:
-            unwrapped_model_for_save.save_pretrained_merged(merged_model_16bit_path, tokenizer, save_method="merged_16bit")
-            print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: Merged 16-bit model saved.", flush=True)
-        except Exception as e_save_16bit:
-            print(f"⚠️ [PID {pid}, Rank {rank_idx}] MAIN PROCESS: Error saving merged 16-bit model: {e_save_16bit}", flush=True)
-            import traceback
-            traceback.print_exc(file=sys.stdout)
-            sys.stdout.flush()
-
-        print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: Saving GGUF to {full_merged_model_path}...", flush=True)
-        try:
-            unwrapped_model_for_save.save_pretrained(full_merged_model_path)
-            tokenizer.save_pretrained(full_merged_model_path)
-            print(f"[PID {pid}, Rank {rank_idx}] MAIN PROCESS: Model saved to GGUF.", flush=True)
-        except Exception as e_gguf:
-            print(f"🔥🔥🔥 [PID {pid}, Rank {rank_idx}] MAIN PROCESS: FATAL ERROR during GGUF save: {e_gguf}", flush=True)
-            import traceback
-            traceback.print_exc(file=sys.stdout)
-            sys.stdout.flush()
-            sys.exit(1)
-
-        del trainer
-        del model
-        del unwrapped_model_for_save
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    print(f"[PID {pid}, Rank {rank_idx}] Script finished successfully for this process.", flush=True)
-    return metrics if 'metrics' in locals() else None
-
+    # --- Меню пост-обработки ---
+    post_training_menu(accelerator, trainer, tokenizer)
 
 if __name__ == "__main__":
-    main_pid = os.getpid()
-    print(f"[PID {main_pid}] Script __main__ started.", flush=True)
-    try:
-        results = main()
-        try:
-            temp_accelerator_check = Accelerator()
-            if temp_accelerator_check.is_main_process:
-                print(f"[PID {main_pid}, MainRank] __main__: Training complete. Metrics: {results}", flush=True)
-        except Exception as e_temp_accel:
-            print(f"⚠️ [PID {main_pid}] Could not create temp accelerator for final print: {e_temp_accel}", flush=True)
-    except Exception as e_main_fatal:
-        print(f"🔥🔥🔥 [PID {main_pid}] FATAL ERROR in __main__ execution: {e_main_fatal}", flush=True)
-        import traceback
-        traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
-        sys.exit(1)
-    print(f"[PID {main_pid}] Script __main__ exiting normally.", flush=True)
+    main()
