@@ -4,6 +4,7 @@
 ### ✅ Confirmed Working:
 
 *  < `Qwen3-14B`
+*  < `Qwen3-4B-Instruct-2507`
   
 
 ## 🚀 Launch
