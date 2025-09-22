@@ -10,9 +10,9 @@
 
 # 🚀 Launch
 
-### 1. accelerate launch unsloth_Accelerate.py  (< 14B) В конце обучения меню
+### 1. `accelerate launch unsloth_Accelerate.py`  (< 14B) В конце обучения меню
 
-### 2. qwen30b_lora.py ( For 30b mods = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"] )*
+### 2. `qwen30b_lora.py` ( For 30b mods = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"] )*
 
 ```
 export CUDA_VISIBLE_DEVICES=1,0
@@ -42,7 +42,7 @@ python -u qwen30b_lora.py \
 
  
 
-### Qwen3-14B accelerate launch unsloth_Accelerate.py
+### `Qwen3-14B accelerate launch unsloth_Accelerate.py`
 
 ```
 [PID 21602] Script start. Python version: 3.13.7 | packaged by Anaconda, Inc. | (main, Sep  9 2025, 19:59:03) [GCC 11.2.0]
@@ -111,7 +111,7 @@ O^O/ \_/ \    Batch size per device = 1 | Gradient accumulation steps = 1
 ```
 
 
-### Unsloth_Qwen3-30B-A3B-Instruct-2507 qwen30b_lora.py 
+### `Unsloth_Qwen3-30B-A3B-Instruct-2507 qwen30b_lora.py`
 
 
 ```
