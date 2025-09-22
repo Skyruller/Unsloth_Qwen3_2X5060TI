@@ -1,23 +1,48 @@
-# Unsloth_Qwen3_2X5060TI
+
+# Unsloth + Qwen3 Setup for Linux + 2 X NVIDIA RTX 5060 Ti
 
 
-### ✅ Confirmed Working:
 
-*  < `Qwen3-14B`
-*  < `Qwen3-4B-Instruct-2507`
-  
+## ✅ Проверено и работает
 
-## 🚀 Launch
+- `Qwen3-30B`, `Qwen3-14B`, `Qwen3-8B`, `Qwen3-4B` (в int4, int8 и FP16)
 
-```bash
-accelerate launch unsloth_Accelerate.py
+
+# 🚀 Launch
+
+### 1. accelerate launch unsloth_Accelerate.py  (< 14B) В конце обучения меню
+
+### 2. qwen30b_lora.py ( For 30b mods = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"] )*
+
 ```
+export CUDA_VISIBLE_DEVICES=1,0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
----
+python -u qwen30b_lora.py \
+  --model "/home/skyruller/webui/user_data/models/unsloth_Qwen3-30B-A3B-Instruct-2507" \
+  --dataset "/media/skyruller/Novy/dataset/dataset_unescaped.jsonl" \
+  --max_seq 256 \
+  --lora_r 8 \
+  --ga 10 \
+  --lr 2e-4 \
+  --epochs 25 \
+  --targets 7 \
+  --attn sdpa \
+  --max_memory "16GiB,16GiB" \
+  --output_dir "outputs_30b" \
+  --merge_fp16 0
+```
+* Если не хватает VRAM, то только mods = ["q_proj","k_proj","v_proj","o_proj"]
+  тогда можно поднять RANK до 128 --max_seq 1024
 
-## ⚡ Benchmarks (GTX 5060 Ti)
 
-### Qwen3-14B
+## 🧠 Советы
+
+- Для ускорения генерации используйте FlashAttention 2
+
+ 
+
+### Qwen3-14B accelerate launch unsloth_Accelerate.py
 
 ```
 [PID 21602] Script start. Python version: 3.13.7 | packaged by Anaconda, Inc. | (main, Sep  9 2025, 19:59:03) [GCC 11.2.0]
@@ -85,29 +110,70 @@ O^O/ \_/ \    Batch size per device = 1 | Gradient accumulation steps = 1
 {'loss': 0.9447, 'grad_norm': 1.287734866142273, 'learning_rate': 0.00019565377532228362, 'epoch': 0.33}                     
 ```
 
-## 📁 Example `requirements.txt`
 
-You can use this sample:
+### Unsloth_Qwen3-30B-A3B-Instruct-2507 qwen30b_lora.py 
+
 
 ```
-tokenizers==0.21.4
-torch==2.8.0
-torchao==0.13.0
-torchvision==0.23.0
-tornado==6.5.2
-tqdm==4.67.1
-traitlets @ file:///work/perseverance-python-buildout/croot/traitlets_1728385099292/work
-transformers==4.55.4
-triton==3.4.0
-trl==0.22.2
-typeguard==4.4.4
-types-python-dateutil==2.9.0.20250822
-typing-inspection==0.4.1
-typing_extensions @ file:///croot/typing_extensions_1756280817316/work
-tyro==0.9.31
-tzdata==2025.2
-unsloth @ git+https://github.com/unslothai/unsloth.git@7c59a9b63fab13cdfe3fe0f2d6b10c59bcd83ef4
-unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo.git@8b312c089a92b5bcde02beb6d68f92e9d81c95fd
-uri-template==1.3.0
+export CUDA_VISIBLE_DEVICES=1,0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+python -u qwen30b.py \
+  --model "/home/skyruller/webui/user_data/models/unsloth_Qwen3-30B-A3B-Instruct-2507" \
+  --dataset "/media/skyruller/Novy/dataset/dataset_unescaped.jsonl" \
+  --max_seq 256 \
+  --lora_r 8 \
+  --ga 8 \
+  --lr 3e-4 \
+  --epochs 25 \
+  --targets 7 \
+  --attn sdpa \
+  --max_memory "13GiB,14GiB" \
+  --output_dir "outputs_30b" \
+  --merge_fp16 0
+[PID 711757] Python: 3.13.7 | packaged by Anaconda, Inc. | (main, Sep  9 2025, 19:59:03) [GCC 11.2.0]
+[PID 711757] PWD: /home/skyruller/unsloth-5090-multiple
+Torch 2.8.0+cu128, CUDA available: True
+CUDA devices visible: 2
+  cuda:0 -> NVIDIA GeForce RTX 5060 Ti
+  cuda:1 -> NVIDIA GeForce RTX 5060 Ti
+🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
+🦥 Unsloth Zoo will now patch everything to make training faster!
+Using max_memory map: {0: '13GiB', 1: '14GiB'}
+==((====))==  Unsloth 2025.9.6: Fast Qwen3_Moe patching. Transformers: 4.56.2.
+   \\   /|    NVIDIA GeForce RTX 5060 Ti. Num GPUs = 2. Max memory: 15.477 GB. Platform: Linux.
+O^O/ \_/ \    Torch: 2.8.0+cu128. CUDA: 12.0. CUDA Toolkit: 12.8. Triton: 3.4.0
+\        /    Bfloat16 = TRUE. FA [Xformers = 0.0.33+115df95.d20250921. FA2 = False]
+ "-____-"     Free license: http://github.com/unslothai/unsloth
+Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 16/16 [00:11<00:00,  1.38it/s]
+Target modules: ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj']
+Unsloth: Making `model.base_model.model.model` require gradients
+num_proc must be <= 9. Reducing num_proc to 9 for dataset of size 9.
+[2025-09-21 22:04:00,088] [INFO] [real_accelerator.py:260:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2025-09-21 22:04:00,340] [INFO] [logging.py:107:log_dist] [Rank -1] [TorchCheckpointEngine] Initialized with serialization = False
+>>> Start training...
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'bos_token_id': None, 'pad_token_id': 151654}.
+==((====))==  Unsloth - 2x faster free finetuning | Num GPUs used = 2
+   \\   /|    Num examples = 416 | Num Epochs = 25 | Total steps = 1,300
+O^O/ \_/ \    Batch size per device = 1 | Gradient accumulation steps = 8
+\        /    Data Parallel GPUs = 1 | Total batch size (1 x 8 x 1) = 8
+ "-____-"     Trainable parameters = 283,508,736 of 30,815,631,360 (0.92% trained)
+  0%|▍                                                                                                                                            | 4/1300 [02:41<14:17:29, 39.70s/it]Unsloth: Will smartly offload gradients to save VRAM!
+{'loss': 1.5998, 'grad_norm': 0.5639712810516357, 'learning_rate': 0.0002956153846153846, 'epoch': 0.38}                                                                                
+{'loss': 0.5247, 'grad_norm': 0.44476211071014404, 'learning_rate': 0.00029099999999999997, 'epoch': 0.77}                                                                              
+{'loss': 0.318, 'grad_norm': 0.2609693109989166, 'learning_rate': 0.0002863846153846154, 'epoch': 1.15}                                                                                 
+{'loss': 0.2046, 'grad_norm': 0.22140665352344513, 'learning_rate': 0.00028176923076923073, 'epoch': 1.54}                                                                              
+........................................
+........................................                                                                         
+{'loss': 0.0832, 'grad_norm': 0.06220075488090515, 'learning_rate': 6.023076923076922e-05, 'epoch': 20.0}                                                                               
+{'loss': 0.0728, 'grad_norm': 0.061242613941431046, 'learning_rate': 5.5615384615384614e-05, 'epoch': 20.38}                                                                            
+ 83%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████▎                       | 1077/1300 [12:27:51<2:42:15, 43.66s/it]
 ```
-## ⚡  Thanks "unsloth-5090-multiple"
+
+
+#### ⚡  Thanks "unsloth-5090-multiple"
+
+
+**@Skyruller** — тестирование и отладка Qwen3 на RTX 5060 Ti  
+
