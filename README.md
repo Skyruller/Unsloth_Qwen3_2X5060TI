@@ -18,19 +18,12 @@
 export CUDA_VISIBLE_DEVICES=1,0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-python -u qwen30b_lora.py \
-  --model "/home/skyruller/webui/user_data/models/unsloth_Qwen3-30B-A3B-Instruct-2507" \
-  --dataset "/media/skyruller/Novy/dataset/dataset_unescaped.jsonl" \
-  --max_seq 256 \
-  --lora_r 8 \
-  --ga 10 \
-  --lr 2e-4 \
-  --epochs 25 \
-  --targets 7 \
-  --attn sdpa \
-  --max_memory "16GiB,16GiB" \
-  --output_dir "outputs_30b" \
-  --merge_fp16 0
+python -u qwen30bDS.py \
+  --model "/home/skyruller/text-generation-webui/user_data/models/Qwen3-4B-Instruct-2507" \
+  --dataset "/media/skyruller/NovyTom/dataset/opensloth_powermill_dataset/dataset.jsonl" \
+  --max_seq 128 --lora_r 24 --ga 4 --lr 2e-4 \
+  --output_dir "outputs_30b" --merge_fp16 0 \
+  --max_memory "16GiB,16GiB"
 ```
 * Если не хватает VRAM, то только mods = ["q_proj","k_proj","v_proj","o_proj"]
   тогда можно поднять RANK до 128 --max_seq 1024
