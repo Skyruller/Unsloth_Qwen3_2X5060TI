@@ -10,7 +10,7 @@
 
 # 🚀 Launch
 
-### 1. `accelerate launch unsloth_Accelerate.py`  (< 14B) В конце обучения меню
+### 1. `accelerate launch unsloth_Accelerate.py`  (< 14B)
 
 ### 2. `qwen30b_lora.py` ( For 30b mods = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"] )*
 
