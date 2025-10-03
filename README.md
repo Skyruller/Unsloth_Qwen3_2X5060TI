@@ -14,6 +14,7 @@
 
 ### 2. `qwen30b_lora.py` ( For 30b mods = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"] )*
 
+### 3.  `Google Colab (Local)` https://colab.research.google.com/drive/1vpPA8bpQb0XdSn9_w_OJGZjHmJwEga8R?usp=sharing
 ```
 export CUDA_VISIBLE_DEVICES=1,0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
