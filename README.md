@@ -1,5 +1,5 @@
 
-# Unsloth + Qwen3 Setup for Linux + 2 X NVIDIA RTX 5060 Ti
+# Unsloth + Qwen3 Setup for Linux + 2 X NVIDIA RTX 5060 Ti + Google Colab (Local)
 
 
 
@@ -165,7 +165,15 @@ O^O/ \_/ \    Batch size per device = 1 | Gradient accumulation steps = 8
 ```
 
 
+## Colab (Local) https://colab.research.google.com/drive/1vpPA8bpQb0XdSn9_w_OJGZjHmJwEga8R?usp=sharing
+
+<img width="3398" height="1282" alt="image" src="https://github.com/user-attachments/assets/62cced4e-4d98-498a-afc8-482a4eac7f3a" />
+<img width="1839" height="1325" alt="image" src="https://github.com/user-attachments/assets/761c91c3-50fa-4fcf-91ba-da3d1b1aa684" />
+
+
 #### ⚡  Thanks "unsloth-5090-multiple"
+
+
 
 
 **@Skyruller** — тестирование и отладка Qwen3 на RTX 5060 Ti  
