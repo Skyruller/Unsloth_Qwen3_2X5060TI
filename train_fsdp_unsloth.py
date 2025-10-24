@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# =========================
-# ВАЖНО: Unsloth импортируем ПЕРВЫМ
-# =========================
 import os
 
-# Безопасный режим: отключаем Triton RMSNorm (лечит "illegal memory access")
+# Безопасные настройки
 if os.environ.get("UNSLOTH_DISABLE_TRITON") is None:
     os.environ["UNSLOTH_DISABLE_TRITON"] = "1"
-# Чтобы не было неожиданной компиляции графов
 os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
-# Меньше болтовни токенайзеров
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-# Меньше фрагментации CUDA памяти
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-from unsloth import FastLanguageModel  # noqa: E402
-
+from unsloth import FastLanguageModel
 import io
 import re
 import math
@@ -33,13 +26,16 @@ import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from torch.optim import AdamW
 
-# FSDP (чистый PyTorch)
+# FSDP
 from functools import partial
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.fully_sharded_data_parallel import ShardingStrategy
 from torch.distributed.fsdp import MixedPrecision
 from torch.distributed.fsdp.api import StateDictType, FullStateDictConfig
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+
+# Для отладки ошибок
+from torch.distributed.elastic.multiprocessing.errors import record
 
 # =========================
 # Утилиты
@@ -53,14 +49,13 @@ def is_dist() -> bool:
     return dist.is_available() and dist.is_initialized()
 
 def is_main() -> bool:
-    return (not is_dist()) or dist.get_rank() == 0
+    return not is_dist() or dist.get_rank() == 0
 
 def mp_print(*args, **kwargs):
     if is_main():
         print(*args, **kwargs, flush=True)
 
 def find_decoder_layer_cls(model: nn.Module):
-    """Ищем класс слоя декодера (например Qwen3DecoderLayer) для auto_wrap_policy."""
     for m in model.modules():
         name = m.__class__.__name__
         if name.endswith("DecoderLayer"):
@@ -68,7 +63,6 @@ def find_decoder_layer_cls(model: nn.Module):
     return None
 
 def cast_model_dtype_(model: nn.Module, dtype: torch.dtype):
-    """Выравниваем dtype у ВСЕХ float параметров и буферов (исключает смесь BF16/FP32)."""
     for p in model.parameters(recurse=True):
         if torch.is_floating_point(p):
             p.data = p.data.to(dtype)
@@ -82,7 +76,7 @@ def cast_model_dtype_(model: nn.Module, dtype: torch.dtype):
     return model
 
 # =========================
-# Парсинг ChatML-текстов
+# Парсинг ChatML
 # =========================
 _CHATML_START = re.compile(r"^\s*<\|im_start\|\>\s*([a-zA-Z_]+)\s*$")
 _CHATML_END   = re.compile(r"^\s*<\|im_end\|\>\s*$")
@@ -128,9 +122,8 @@ def _parse_chatml_dialogs(text: str) -> List[List[Dict[str, str]]]:
         if line.strip() == "":
             empty_run += 1
             if empty_run >= 2:
-                if role is not None or cur:
-                    flush_msg()
-                    flush_dialog()
+                flush_msg()
+                flush_dialog()
             continue
         else:
             empty_run = 0
@@ -148,21 +141,17 @@ def _parse_chatml_dialogs(text: str) -> List[List[Dict[str, str]]]:
 def load_texts_from_chatml_txt(path: str, tokenizer) -> List[str]:
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read()
-
     dialogs = _parse_chatml_dialogs(raw)
-    mp_print(f"[DATA] Диалогов (блоков): {len(dialogs)}")
+    mp_print(f"[DATA] Диалогов: {len(dialogs)}")
 
     texts: List[str] = []
     for msgs in dialogs:
         norm = []
         for m in msgs:
             r = m["role"].lower()
-            if r.startswith("sys"):
-                r = "system"
-            elif r.startswith("ass"):
-                r = "assistant"
-            elif r.startswith("usr") or r.startswith("user"):
-                r = "user"
+            if r.startswith("sys"): r = "system"
+            elif r.startswith("ass"): r = "assistant"
+            elif r.startswith(("usr", "user")): r = "user"
             norm.append({"role": r, "content": m["content"]})
 
         txt = tokenizer.apply_chat_template(norm, tokenize=False, add_generation_prompt=False)
@@ -214,18 +203,18 @@ class DataCollator:
             attention_mask.append(att)
             labels.append(lbl)
         return {
-            "input_ids": torch.stack(input_ids, dim=0),
-            "attention_mask": torch.stack(attention_mask, dim=0),
-            "labels": torch.stack(labels, dim=0),
+            "input_ids": torch.stack(input_ids),
+            "attention_mask": torch.stack(attention_mask),
+            "labels": torch.stack(labels),
         }
 
 # =========================
-# DDP/FSDP init/cleanup
+# DDP/FSDP init
 # =========================
 def ddp_setup():
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl")
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
     torch.empty(1, device="cuda")
     return local_rank, dist.get_rank(), dist.get_world_size()
@@ -240,11 +229,11 @@ def ddp_cleanup():
 # =========================
 def build_model_and_tokenizer(model_path: str, max_seq_len: int, dtype: torch.dtype, gc: bool):
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name        = model_path,
-        dtype             = dtype,
-        load_in_4bit      = False,
-        device_map        = {"": "cpu"},  # FSDP сам управляет размещением
-        low_cpu_mem_usage = True,
+        model_name=model_path,
+        dtype=dtype,
+        load_in_4bit=False,
+        device_map="cpu",
+        low_cpu_mem_usage=True,
     )
 
     if tokenizer.pad_token is None:
@@ -256,7 +245,7 @@ def build_model_and_tokenizer(model_path: str, max_seq_len: int, dtype: torch.dt
 
     model = FastLanguageModel.get_peft_model(
         model,
-        r=8, lora_alpha=16, lora_dropout=0.0,
+        r=32, lora_alpha=64, lora_dropout=0.0,
         target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
         bias="none",
         use_gradient_checkpointing=("unsloth" if gc else False),
@@ -266,85 +255,88 @@ def build_model_and_tokenizer(model_path: str, max_seq_len: int, dtype: torch.dt
     return model, tokenizer
 
 # =========================
-# Точка входа
+# Сохранение ТОЛЬКО LoRA (без дедлоков!)
 # =========================
+def save_adapter(model, tokenizer, output_dir: str):
+    """
+    Сохраняем ТОЛЬКО LoRA-адаптер.
+    Используем summon_full_params с правильным параметром `recurse=True`.
+    Все ранги входят в контекст, только rank0 сохраняет.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Правильно: recurse (а не recursive)
+    with FSDP.summon_full_params(model, writeback=False, recurse=True):
+        if is_main():
+            try:
+                model.save_pretrained(output_dir, safe_serialization=True)
+                tokenizer.save_pretrained(output_dir)
+                mp_print(f"✅ LoRA успешно сохранён: {output_dir}")
+            except Exception as e:
+                mp_print(f"[ERROR] Ошибка при сохранении: {e}")
+                raise
+
+    # Критически важный барьер
+    dist.barrier()
+
+# =========================
+# Главная функция (с @record для отладки)
+# =========================
+@record
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--devices", type=str, default="0", help="GPU IDs, e.g. 0,1 (use torchrun for multi-GPU)")
-    p.add_argument("--model", type=str, required=True)
-    p.add_argument("--data", type=str, required=True)
-    p.add_argument("--out", type=str, default="./out_fsdp_lora")
-    p.add_argument("--max_seq_len", type=int, default=896)
-    p.add_argument("--epochs", type=int, default=1)
-    p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--weight_decay", type=float, default=0.0)
-    p.add_argument("--warmup_ratio", type=float, default=0.03)
-    p.add_argument("--microbatch", type=int, default=1)
-    p.add_argument("--grad_accum", type=int, default=1)
-    p.add_argument("--grad_clip", type=float, default=1.0)
-    p.add_argument("--num_workers", type=int, default=0)
-    p.add_argument("--dtype", type=str, default="bf16", choices=["bf16","fp16","fp32"])
-    p.add_argument("--save_every", type=int, default=0)
-    p.add_argument("--log_every", type=int, default=10)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--gc", action="store_true", help="Enable gradient checkpointing (unsloth)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--data", type=str, required=True)
+    parser.add_argument("--out", type=str, default="./lora_adapter")
+    parser.add_argument("--max_seq_len", type=int, default=896)
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--warmup_ratio", type=float, default=0.03)
+    parser.add_argument("--microbatch", type=int, default=1)
+    parser.add_argument("--grad_accum", type=int, default=4)
+    parser.add_argument("--grad_clip", type=float, default=1.0)
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
+    parser.add_argument("--save_every", type=int, default=0)
+    parser.add_argument("--log_every", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--gc", action="store_true")
+    args = parser.parse_args()
 
-    args = p.parse_args()
-
-    want_bf16 = args.dtype == "bf16"
-    want_fp16 = args.dtype == "fp16"
-    dtype = torch.bfloat16 if want_bf16 else (torch.float16 if want_fp16 else torch.float32)
-
-    os.makedirs(args.out, exist_ok=True)
     set_seed(args.seed)
+    dtype = torch.bfloat16 if args.dtype == "bf16" else (torch.float16 if args.dtype == "fp16" else torch.float32)
+    os.makedirs(args.out, exist_ok=True)
 
-    distributed = all(k in os.environ for k in ("RANK", "WORLD_SIZE", "LOCAL_RANK"))
-    
+    distributed = "RANK" in os.environ
     if distributed:
         local_rank, rank, world_size = ddp_setup()
-        if is_main():
-            mp_print(f"[Init] procs={world_size} | out={args.out}")
-            mp_print(f"[Paths] model={args.model}\n        data ={args.data}")
+        mp_print(f"[Init] procs={world_size} | out={args.out}")
     else:
-        rank = 0
-        world_size = 1
-        torch.cuda.set_device(int(args.devices.split(",")[0]))
-        torch.empty(1, device="cuda")
+        rank, world_size = 0, 1
+        torch.cuda.set_device(0)
         mp_print(f"[Init] single GPU | out={args.out}")
 
-    # Загрузка модели и токенизатора
-    model, tokenizer = build_model_and_tokenizer(args.model, args.max_seq_len, dtype, gc=args.gc)
+    model, tokenizer = build_model_and_tokenizer(args.model, args.max_seq_len, dtype, args.gc)
+    
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    mp_print(f"🔧 Trainable: {trainable:,} ({trainable/total:.2%}) of {total:,}")
 
-    # Данные
     texts = load_texts_from_chatml_txt(args.data, tokenizer)
-    if len(texts) == 0:
-        raise RuntimeError("Датасет пуст после парсинга ChatML.")
-
     ds = TextDataset(texts, tokenizer, args.max_seq_len)
-    sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False) if distributed else None
-
+    sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True) if distributed else None
     collate = DataCollator(pad_id=tokenizer.pad_token_id)
-    dl = DataLoader(
-        ds,
-        batch_size=args.microbatch,
-        sampler=sampler,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        collate_fn=collate,
-        persistent_workers=False,
-    )
+    dl = DataLoader(ds, batch_size=args.microbatch, sampler=sampler, collate_fn=collate, num_workers=0)
 
-    # Оптимизатор и LR scheduler
     no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight", "norm.weight"]
     grouped = [
-        {"params": [p for n, p in model.named_parameters() if p.requires_grad and not any(nd in n for nd in no_decay)],
-         "weight_decay": args.weight_decay},
-        {"params": [p for n, p in model.named_parameters() if p.requires_grad and any(nd in n for nd in no_decay)],
-         "weight_decay": 0.0},
+        {"params": [p for n, p in model.named_parameters() if p.requires_grad and not any(nd in n for nd in no_decay)], "weight_decay": args.weight_decay},
+        {"params": [p for n, p in model.named_parameters() if p.requires_grad and any(nd in n for nd in no_decay)], "weight_decay": 0.0},
     ]
     optimizer = AdamW(grouped, lr=args.lr, betas=(0.9, 0.999), eps=1e-8)
 
-    total_steps = math.ceil(len(ds) / (args.microbatch * world_size * max(1, args.grad_accum))) * args.epochs
+    total_steps = math.ceil(len(ds) / (args.microbatch * world_size * args.grad_accum)) * args.epochs
     warmup_steps = max(1, int(total_steps * args.warmup_ratio))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -353,13 +345,11 @@ def main():
         else max(0.0, float(total_steps - step) / max(1, total_steps - warmup_steps))
     )
 
-    # FSDP обёртка
     if distributed and world_size > 1:
         dec_cls = find_decoder_layer_cls(model)
         if dec_cls is None:
-            ddp_cleanup()
-            raise RuntimeError("Не найден класс DecoderLayer для auto_wrap_policy.")
-        mp_print(f"[FSDP] auto_wrap по классу: {dec_cls.__name__}")
+            raise RuntimeError("Не найден DecoderLayer")
+        mp_print(f"[FSDP] auto_wrap: {dec_cls.__name__}")
 
         auto_wrap = partial(transformer_auto_wrap_policy, transformer_layer_cls={dec_cls})
         mp_policy = MixedPrecision(param_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype)
@@ -377,39 +367,11 @@ def main():
     else:
         model = model.cuda()
 
-    # Функция сохранения
-    def save_adapter(tag: str):
-        save_dir = os.path.join(args.out, tag)
-        
-        # Все процессы должны войти в контекст
-        with FSDP.state_dict_type(
-            model,
-            StateDictType.FULL_STATE_DICT,
-            FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
-        ):
-            state_dict = model.state_dict()
-            
-            if is_main():
-                os.makedirs(save_dir, exist_ok=True)
-                # Извлекаем base_model из PEFT
-                base_model = model._forward_module.base_model if hasattr(model, "_forward_module") else model.base_model
-                base_model.save_pretrained(save_dir, state_dict=state_dict, safe_serialization=True)
-                tokenizer.save_pretrained(save_dir)
-                mp_print(f"💾 Сохранено: {save_dir}")
-
-        # Синхронизация всех рангов
-        if distributed:
-            dist.barrier()
-
-    # Обучение
     model.train()
     if distributed:
         dist.barrier()
 
-    mp_print(f"🚀 Начинаем обучение ...")
-    mp_print(f"[Config] dtype={args.dtype}, microbatch={args.microbatch}, grad_accum={args.grad_accum}, "
-             f"steps_per_epoch={math.ceil(len(ds)/(args.microbatch*world_size))}, total_steps={total_steps}")
-
+    mp_print(f"🚀 Начинаем обучение... total_steps={total_steps}")
     global_step = 0
     t0 = time.time()
 
@@ -419,8 +381,7 @@ def main():
         optimizer.zero_grad(set_to_none=True)
 
         for step, batch in enumerate(dl, start=1):
-            # Убираем .cuda() — FSDP сам переместит данные
-            input_ids = batch["input_ids"]          # уже на CPU, FSDP сам загрузит
+            input_ids = batch["input_ids"]
             attention_mask = batch["attention_mask"]
             labels = batch["labels"]
 
@@ -440,24 +401,27 @@ def main():
                 if is_main() and (global_step <= 5 or global_step % args.log_every == 0):
                     lr_now = scheduler.get_last_lr()[0]
                     avg_loss = loss.item() * args.grad_accum
-                    mp_print(f"[step {global_step:>6}/{total_steps}] loss={avg_loss:.4f} lr={lr_now:.3e}")
+                    mp_print(f"[step {global_step:>4}/{total_steps}] loss={avg_loss:.4f} lr={lr_now:.2e}")
 
                 if args.save_every and global_step % args.save_every == 0:
-                    save_adapter(f"checkpoint-step{global_step}")
+                    save_adapter(model, tokenizer, os.path.join(args.out, f"checkpoint-step{global_step}"))
+                    
 
-        # Сохранение в конце эпохи
-        save_adapter(f"checkpoint-epoch{epoch+1}")
+    # ✅ Сохраняем финальный адаптер, даже если не попали в --save_every
+    if is_main():
+        save_adapter(model, tokenizer, os.path.join(args.out, "final-checkpoint"))
+        
+    # Барьер перед завершением
+    if distributed:
+        dist.barrier()
 
     if is_main():
         dt = time.time() - t0
-        mp_print(f"✅ Обучение завершено. Шагов: {global_step}, время: {dt/60:.1f} мин. Результат: {args.out}")
+        mp_print(f"✅ Обучение завершено. Шагов: {global_step}, время: {dt/60:.1f} мин.")
 
     if distributed:
         ddp_cleanup()
 
-# =========================
-# Запуск
-# =========================
 if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
