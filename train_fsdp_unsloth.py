@@ -239,7 +239,7 @@ def build_model_and_tokenizer(model_path: str, max_seq_len: int, dtype: torch.dt
 
     model = FastLanguageModel.get_peft_model(
         model,
-        r=32, lora_alpha=64, lora_dropout=0.0,
+        r=512, lora_alpha=1024, lora_dropout=0.0,
         target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
         bias="none",
         use_gradient_checkpointing=("unsloth" if gc else False),
@@ -251,30 +251,55 @@ def build_model_and_tokenizer(model_path: str, max_seq_len: int, dtype: torch.dt
 # =========================
 # Сохранение ТОЛЬКО LoRA
 # =========================
+# =========================
+# Сохранение ТОЛЬКО LoRA (CPU-safe, без OOM)
+# =========================
 def save_adapter(model, tokenizer, output_dir: str):
     """
-    Коллективно вызывается ВСЕМИ ранками.
-    На диск пишет только rank0 (is_main()).
+    FSDP-safe сохранение LoRA:
+    - сбор параметров
+    - перенос на CPU
+    - сохранение БЕЗ GPU clone
     """
+
     os.makedirs(output_dir, exist_ok=True)
     is_fsdp = isinstance(model, FSDP)
 
     if is_fsdp and is_dist():
-        # Синхронизируемся перед сборкой
         dist.barrier()
+
+        # 🔥 ВАЖНО: собираем параметры, но НЕ пишем обратно
         with FSDP.summon_full_params(model, writeback=False, recurse=True):
             if is_main():
-                model.save_pretrained(output_dir, safe_serialization=True)
+                # 1️⃣ Забираем ТОЛЬКО LoRA state_dict
+                state_dict = model.state_dict()
+
+                # 2️⃣ Переносим всё на CPU (ключевой момент)
+                cpu_state_dict = {
+                    k: v.detach().cpu()
+                    for k, v in state_dict.items()
+                    if "lora_" in k
+                }
+
+                # 3️⃣ Сохраняем вручную
+                torch.save(cpu_state_dict, os.path.join(output_dir, "adapter_model.bin"))
                 tokenizer.save_pretrained(output_dir)
-        # И после записи
+
         dist.barrier()
+
     else:
-        # single-GPU или без FSDP
-        model.save_pretrained(output_dir, safe_serialization=True)
+        # single GPU / no FSDP
+        state_dict = {
+            k: v.detach().cpu()
+            for k, v in model.state_dict().items()
+            if "lora_" in k
+        }
+        torch.save(state_dict, os.path.join(output_dir, "adapter_model.bin"))
         tokenizer.save_pretrained(output_dir)
 
     if is_main():
-        print(f"💾 Сохранено: {output_dir}", flush=True)
+        print(f"💾 CPU-safe LoRA сохранена: {output_dir}", flush=True)
+
 
 # =========================
 # Главная
@@ -284,7 +309,7 @@ def main():
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--data", type=str, required=True)
     parser.add_argument("--out", type=str, default="./out_fsdp_lora")
-    parser.add_argument("--max_seq_len", type=int, default=896)
+    parser.add_argument("--max_seq_len", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight_decay", type=float, default=0.0)
